@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from datetime import datetime
 from geopy.geocoders import Nominatim
 import re
+import time
 
 # Konfiguracja strony
 st.set_page_config(page_title="SQM Logistics Retro Terminal", layout="wide")
@@ -45,34 +45,45 @@ def load_data(sheet_name):
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def get_coordinates(city_name):
-    if not city_name:
-        return None, None
-    geolocator = Nominatim(user_agent="sqm_logistics_v3")
-    try:
-        # Próbujemy znaleźć miasto
-        location = geolocator.geocode(city_name, timeout=10)
-        if location:
-            return location.latitude, location.longitude
-        return None, None
-    except:
-        return None, None
-
-def clean_city_name(fair_name):
-    """Wyciąga miasto z nazw typu 'BTL LISBOA', 'JEC World / Paryż', 'ITB BERLIN'"""
-    text = str(fair_name)
-    # 1. Jeśli jest ukośnik (np. Paryż / Francja), bierzemy to po ukośniku lub przed
+def get_coordinates(fair_name):
+    geolocator = Nominatim(user_agent="sqm_logistics_final")
+    
+    # --- PROCES CZYSZCZENIA NAZWY ---
+    text = str(fair_name).upper()
+    
+    # 1. Usuń rok (np. 2026)
+    text = re.sub(r'\d{4}', '', text)
+    
+    # 2. Jeśli jest ukośnik, bierzemy to co po ukośniku (często tam jest miasto)
     if '/' in text:
         text = text.split('/')[-1]
     
-    # 2. Usuwamy lata (np. 2026)
-    text = re.sub(r'\d{4}', '', text)
+    # 3. Usuń popularne nazwy targów, które mylą geokoder
+    blacklist = ['EUROSHOP', 'BTL', 'ITB', 'ECR', 'JEC WORLD', 'PROWEIN', 'KUBECON', 'XPONENTIAL', 'EBCC', 'STOM', 'DMEA', 'ESCMID', 'IFAT', 'DTW', 'SALONE DEL MOBILE']
+    for word in blacklist:
+        text = text.replace(word, '')
     
-    # 3. Bierzemy ostatnie słowo (zazwyczaj miasto w Twoim arkuszu)
-    words = text.strip().split()
-    if words:
-        return words[-1]
-    return None
+    # 4. Wyczyść białe znaki
+    city_candidate = text.strip()
+    
+    if not city_candidate:
+        return None, None
+
+    try:
+        # Próba geokodowania czystego miasta
+        location = geolocator.geocode(city_candidate, timeout=10)
+        if location:
+            return location.latitude, location.longitude
+        
+        # Próba ostatniej szansy: samo ostatnie słowo
+        last_word = city_candidate.split()[-1]
+        location = geolocator.geocode(last_word, timeout=10)
+        if location:
+            return location.latitude, location.longitude
+            
+        return None, None
+    except:
+        return None, None
 
 # --- GŁÓWNA LOGIKA ---
 
@@ -93,11 +104,9 @@ status_colors = {
     "ZAKOŃCZONE": "lightgray"
 }
 
-# Iteracja po danych
+# Iteracja i nakładanie punktów
 for idx, row in full_df.iterrows():
-    raw_name = row['Nazwa Targów']
-    city = clean_city_name(raw_name)
-    lat, lon = get_coordinates(city)
+    lat, lon = get_coordinates(row['Nazwa Targów'])
     
     if lat and lon:
         locations_found += 1
@@ -105,12 +114,12 @@ for idx, row in full_df.iterrows():
         marker_color = status_colors.get(status, "blue")
         
         popup_content = f"""
-        <div style="font-family: 'Courier New'; width: 160px;">
-            <b style="color: #e61e2a;">{raw_name}</b><br>
-            <hr>
-            Status: {status}<br>
-            Logistyk: {row['Logistyk']}<br>
-            Auto: {row['Auta']}
+        <div style="font-family: 'Courier New'; width: 160px; font-size: 12px;">
+            <b style="color: #e61e2a;">{row['Nazwa Targów']}</b><br>
+            <hr style="margin: 5px 0;">
+            <b>Status:</b> {status}<br>
+            <b>Logistyk:</b> {row['Logistyk']}<br>
+            <b>Auto:</b> {row['Auta']}
         </div>
         """
         
@@ -118,8 +127,11 @@ for idx, row in full_df.iterrows():
             [lat, lon],
             popup=folium.Popup(popup_content, max_width=200),
             icon=folium.Icon(color=marker_color, icon='truck', prefix='fa'),
-            tooltip=raw_name
+            tooltip=row['Nazwa Targów']
         ).add_to(m)
+    # Krótka pauza, by nie zablokować geokodera przy starcie
+    if idx % 5 == 0:
+        time.sleep(0.1)
 
 # --- LAYOUT ---
 col_map, col_info = st.columns([3, 1])
@@ -136,5 +148,5 @@ with col_info:
     st.metric("Zlokalizowane", locations_found)
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/Coca-Cola_logo.svg/512px-Coca-Cola_logo.svg.png", width=120)
 
-st.markdown("### 📋 PEŁNA LISTA Z ARKUSZA")
+st.markdown("### 📋 PEŁNA LISTA OPERACYJNA")
 st.dataframe(full_df, use_container_width=True)
